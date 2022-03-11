@@ -1,0 +1,738 @@
+---
+title: "UMAP Clustering of Ribodepleted RNA-seq from SWOG"
+author: "Scott Furlan, modified by Jenny Smith"
+date: "2/19/20"
+output: html_document
+---
+
+#Set-up
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(SWOG,"RNA/mRNAseq/analysis/2020.02.19_UMAP_clustering"))
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+```
+
+```{r message=FALSE}
+library(DESeq2)
+library(seqGlue)
+# library(apeglm)
+
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+library(readr)
+library(dplyr)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(data.table)
+library(readr)
+library(tools)
+
+
+# library(m3addon)
+library(jackstraw)
+library(DeGSEA)
+getwd()
+```
+
+```{r}
+source(file.path(SCRIPTS,"survival_analysis/Survplot_Functions_2018.10.24.r"))
+```
+
+
+#Define Functions 
+
+###UMAP
+
+```{r}
+# NOTE:
+#  Warning does not affect anything."The message is actually coming from one iteration of the parametric dispersion fit, which also involves fitting a GLM of the dispersions over the mean. So one iteration of the fitting of the dispersion trend didn't converge, but then there is no other note, so the final iteration did converge." (https://support.bioconductor.org/p/61780/). 
+
+UMAP_function <- function(vdata, metadata,N,scale_data=FALSE, threads=2){
+    #tf is a expression matrix, tfidf transformed with samples as columns, genes as rows. It has been subset to selected genes
+    set.seed(2020)
+    UMAP<-uwot::umap(X = t(vdata), 
+                     n_components = N,
+                     scale = scale_data,
+                     metric = "cosine",
+                     spread= 1,
+                     
+                     min_dist = 0.1, #originally 0.1 by SF
+                     n_neighbors = 15L, #was default 15 
+                     fast_sgd = FALSE, 
+                     n_epochs=500, #increased from default 200
+                     
+                     init = "spectral", #default
+                     nn_method = "annoy", #Use approximate nearest neighbors 
+                     n_trees=100, #default is 50
+                     search_k=5*15*100, #default is 2*n_neighbors*n_trees
+                     repulsion_strength=1, #default
+                     
+                     n_threads=threads,
+                     tmpdir=file.path(SCRATCH,"jlsmith3"),
+                     verbose=T)
+    gc()
+    toplot<-data.frame(x=UMAP[,1],y=UMAP[,2])
+    if(ncol(UMAP)==3){toplot[["z"]] <- UMAP[,3]}
+    toplot<-as.data.frame(cbind(toplot, metadata))
+    gc()
+    
+    # res <- list("input_genes"=sg,,"UMAP"=toplot)
+    return(toplot)
+}
+
+```
+
+
+###Scatter Plots 2D
+
+```{r}
+scatter_plots_2d <-  function(umap_df, Columns, ColorCodes){
+    
+    ps <- list()
+    for (i in 1:length(Columns)){
+            Col <- Columns[i]
+            p <- ggplot(data=umap_df,
+                            aes_string(x="x",y="y",color=Col))+
+                      geom_point(size=1, alpha=0.75)+
+                      labs(title=paste("UMAP Colored by",Col),
+                       x="UMAP_1", y="UMAP_2") +
+                      scale_color_manual(values=ColorCodes[[Col]])  +
+                      theme_classic() +
+                      theme(panel.background = element_rect(color = "black", 
+                                            fill="black"),
+                            axis.text = element_text(size=18),
+                            legend.position = 'top') +
+                      guides(color = guide_legend(override.aes = list(size=4)))
+            ps[[i]] <- p
+    }
+  
+  
+   ag <- gridExtra::arrangeGrob(grobs=ps,col=2)
+   return(ag)
+}
+```
+
+
+
+
+### Cluster Scatter/Bar
+
+```{r}
+cluster_plots <- function(umap_results, colorCodes,colorsSubtypes){
+  
+  scatter_plot <- ggplot(umap_results, 
+                         aes(x=x,y=y,col=as.factor(cluster))) +
+      geom_point(size=0.75)+
+      xlab("UMAP_1") + ylab("UMAP_2") +
+      labs(title="Leiden Clustering of UMAP Dimensions") +
+      theme_classic() +
+      theme(panel.background = element_rect(color = "black", 
+                                            fill="black")) +
+      guides(color = guide_legend(override.aes = list(size=4))) +
+      scale_color_manual(values=colorCodes)
+  
+  
+  temp <- umap_results %>% 
+    group_by(cluster, Mutation_Category) %>% 
+    summarise(N=n()) %>% 
+    ungroup() %>% 
+    group_by(cluster) %>%
+    mutate(num_in_cluster=sum(N))
+  y_lim <- max(temp$num_in_cluster)+10
+
+  cluster_members <- ggplot(temp, aes(y=N, x=as.factor(cluster), 
+                                  fill=Mutation_Category))+
+    geom_bar(stat="identity", size=0.2, width=0.75, color="black") +
+    geom_point(aes(x=as.factor(cluster), y=y_lim, 
+                   color=as.factor(cluster)),
+               size=5, inherit.aes = FALSE) +
+    scale_fill_manual(values=colorsSubtypes) +
+    guides(fill=guide_legend(ncol=2)) +
+    scale_color_manual(values=colorCodes) +
+    scale_y_continuous(breaks=seq(0,y_lim,by=25),
+                       limits=c(0,y_lim)) +
+    labs(x="Cluster",y="Major Fusion Type", 
+         main="Leiden Clustering of UMAP:\nAML Subtypes in each Cluster") + 
+    theme_classic()
+  
+  
+  plots <- list("scatter"=scatter_plot,
+                "barplot"=cluster_members)
+  
+}
+```
+
+### Outcome KM
+
+```{r}
+outcome_by_cluster_df <- function(umap_results){
+  library(survival)
+  
+  outcome_df <- umap_results %>% 
+    filter(!is.na(OS.time..days.)) %>%
+    group_by(cluster) %>% 
+    mutate(N_in_cluster=n())%>%
+  
+    group_by(Mutation_Category,add = TRUE) %>% 
+    mutate(Number_Subtype_in_cluster=n()) %>%
+    ungroup() %>% 
+    
+    group_by(cluster) %>%
+    mutate(Major_Subtype_in_cluster=unique(Mutation_Category[which(Number_Subtype_in_cluster ==
+                                                               max(Number_Subtype_in_cluster))]) %>% 
+             ifelse(length(.) > 1, .[.!="No.Primary.Fusion.CNV"], .)) %>%
+    
+    mutate(Major_vs_minor_Subtype_in_Cluster=case_when(
+      Mutation_Category == Major_Subtype_in_cluster ~ paste(Mutation_Category,"Major Subtype"),
+      TRUE ~ "Minor Subtypes")) %>% 
+    ungroup() %>%
+    
+    group_by(Mutation_Category) %>%
+    mutate(Subtype_Outlier_by_cluster=case_when(
+        Number_Subtype_in_cluster < max(Number_Subtype_in_cluster) ~ "Other Clusters",
+        TRUE ~ "Majority Cluster")) %>%
+    ungroup() %>%
+    
+    # select(Sample, cluster, Mutation_Category, matches("cluster")) %>%
+    arrange(cluster,desc(Number_Subtype_in_cluster)) 
+  
+  return(outcome_df)
+}
+```
+
+```{r fig.height=7, fig.width=12}
+KM_plots_workflow <- function(outcome_data,cc_clusters){
+  library(survival)
+  
+  num_clust <- length(unique(outcome_data$cluster))
+  cluster_KM <- lapply(1:num_clust,function(x){
+    idx <- outcome_data$cluster==x
+    df <- outcome_data[idx,]
+    
+    if(nrow(df) >= 5){
+      fit_OS <- survfit(Surv(OS.time..days./365.25, OS.ID) ~ cluster, 
+                        data = df)
+      p_OS <- SurvivalPlot(fit=fit_OS,
+                        LegendTitle=paste0("Cluster is", x), 
+                        timeUnit="Years", 
+                        colors=cc_clusters[x]) +
+        labs(title=paste0("OS: Cluster ", x)) +
+        annotate("text", x=1,y=0.05,label=paste0("N=",nrow(df)), size=5) +
+        annotate("text", x=5,y=1.0,label=paste0("Major Subtype:",
+                                                unique(df$Major_Subtype_in_cluster)))
+  
+      fit_EFS <- survfit(Surv(EFS.time..days./365.25, Event.ID) ~ cluster,
+                         data = df)
+      p_EFS <- SurvivalPlot(fit=fit_EFS,
+                        LegendTitle=paste0("Cluster is", x), 
+                        timeUnit="Years", 
+                        colors=cc_clusters[x]) +
+        labs(title=paste0("EFS: Cluster ", x)) +
+        annotate("text", x=1,y=0.05,label=paste0("N=",nrow(df)), size=5) +
+        annotate("text", x=5,y=1.0,label=paste0("Major Subtype:",
+                                            unique(df$Major_Subtype_in_cluster)))
+                   
+      return(list(OS=p_OS,EFS=p_EFS))}
+  })
+  
+  
+  OS_KM <- lapply(cluster_KM,`[[`, 1)
+  EFS_KM <- lapply(cluster_KM,`[[`, 2)
+  
+  idx <- sapply(OS_KM, length) > 0
+  OS_KM <- OS_KM[idx]
+  EFS_KM <- EFS_KM[idx]
+
+
+  df <- group_by(outcome_data,Mutation_Category) %>% 
+    filter(sum(Subtype_Outlier_by_cluster == "Other Clusters") >= 3 & 
+         sum(Subtype_Outlier_by_cluster == "Majority Cluster") >= 3) 
+
+  KM.bySubtype <- KM.plots(df = df,
+                         group_vars = "Mutation_Category",
+                         type = "OS",
+                         covariate = "Subtype_Outlier_by_cluster",
+                         cohort = "1031", 
+                         riskTable = TRUE)
+
+  temp <- outcome_data %>%
+    mutate(cluster=paste0("Cluster_",as.character(cluster))) %>%
+    group_by(cluster, Major_vs_minor_Subtype_in_Cluster) %>%  
+    mutate(N_type_per_cluster=case_when(
+      Major_vs_minor_Subtype_in_Cluster == "Minor Subtypes" ~
+        sum(Major_vs_minor_Subtype_in_Cluster == "Minor Subtypes"),
+      grepl("Major Subtype", Major_vs_minor_Subtype_in_Cluster) ~
+        sum(grepl("Major Subtype", Major_vs_minor_Subtype_in_Cluster)))) %>%
+    ungroup() %>%
+    group_by(cluster) %>%
+    filter(min(N_type_per_cluster) >= 3 & 
+             length(unique(Major_vs_minor_Subtype_in_Cluster)) > 1) %>%
+    ungroup() 
+  
+  KM.withinClusters <- KM.plots(df = temp,
+                                 group_vars = "cluster",
+                                 type = "OS",
+                                 covariate = "Major_vs_minor_Subtype_in_Cluster",
+                                 cohort = "1031", 
+                                 riskTable = FALSE)
+
+  KM.KMT2A <- KM.plots(df = filter(outcome_data, Mutation_Category=="KMT2A") %>%
+                                  group_by(cluster) %>% 
+                                  filter(n()>=3) %>%
+                                  ungroup() %>%
+                                filter(Major_Subtype_in_cluster=="KMT2A"),
+                           group_vars = NULL,
+                           type = "OS",
+                           covariate = "cluster",
+                           cohort = "1031", 
+                           riskTable = FALSE)
+  
+  all_plots <- list(OS_KM=OS_KM,
+                    EFS_KM=EFS_KM,
+                    KM.bySubtype=KM.bySubtype,
+                    KM.withinClusters=KM.withinClusters,
+                    KM.KMT2A=KM.KMT2A)
+  return(all_plots)
+  
+}  
+```
+
+###UMAP Workflow 
+
+```{r}
+UMAP_workflow <- function(TFIDF_Matrix, samples_vector,
+                          swog_swinfo_df, cc,Plotting_Cols,
+                          addl_color_vector=colors37,
+                          scale_data=FALSE, uniqID=""){
+  # TFIDF_Matrix is the subset TFIDF transformed counts that has been subbset to include mean vs dispersion selected features 
+  #samples_vector is a character vector of sample IDs to include in the analysis
+  # swog_swinfo_df,
+  #cc is a list of colorcodes, where colorcodes are named vectors for columns of interest with the "Group"="Color" format
+  #Plotting_Cols is a charcter vector of colums to color points by
+  # addl_color_vector is a simple character vector of additional colors,
+  #scale_data is aboolean on whether TFIDF transformed counts should be center scaled
+  library(survival)
+  library(GGally)
+  library(RColorBrewer)
+  
+  PA.file <- file.path(SCRATCH,"tmp",paste0("PA_",uniqID, ".RDS"))
+  if(file.exists(PA.file)){
+    PA <- readRDS(PA.file)
+  }else{
+    #Plus PCA (Jackstraw) Feature Selection 
+    PA = permutationPA(as.matrix(TFIDF_Matrix[,samples_vector]), 
+                     B = 100, #100 iterations
+                     threshold = 0.05, 
+                     seed=2020)
+    gc()
+    saveRDS(PA,PA.file)
+  }
+  
+  pa.plot <- plot(PA$p,  pch = 20, 
+       main = "Permutation Parallel Analysis P-values",
+       ylab = "P-values", xlab = "Principal Component")
+  
+  #select number of pricinipal components that encompass most variance explained
+  N_comp <- PA$r
+  
+  jackpca.file <- file.path(SCRATCH,"tmp",paste0("JackPCA_",uniqID, ".RDS"))
+  if(file.exists(jackpca.file)){
+    out <- readRDS(jackpca.file)
+  }else{
+    out <-  jackstraw_pca(dat=as.matrix(TFIDF_Matrix[,samples_vector]), 
+                        r=N_comp,
+                        s=100, B=100,
+                        verbose = TRUE, 
+                        seed=2020) 
+    gc()
+    saveRDS(out,jackpca.file)
+  }
+  
+  #Select genes significantly assoc. with principal components
+  input_features <- rownames(TFIDF_Matrix)[out$p.value < 0.05] 
+
+  #Run UMAP on selected Featrues
+  vdata <- as.matrix(TFIDF_Matrix[input_features, samples_vector])
+  mdata <- swog_swinfo_df[samples_vector,]
+  
+  umap.file <- file.path(SCRATCH,"tmp",paste0("UMAP_",uniqID, ".RDS"))
+  if(file.exists(umap.file)){
+    umap_res <- readRDS(umap.file)
+  }else{
+    set.seed(2020)
+    umap_res <- UMAP_function(vdata=vdata,
+                             metadata = mdata,
+                             N = 3, 
+                             scale_data = scale_data, 
+                            threads = 4)
+    umap_res$Sample <- rownames(umap_res)
+    gc()
+    saveRDS(umap_res, umap.file)
+  }
+
+
+  #2D Plots 
+  plots_UMAP <- scatter_plots_2d(umap_df = umap_res,
+                                 Columns = Plotting_Cols, 
+                                 ColorCodes = cc)
+
+  ## Leiden Clustering on UMAP dimensions
+  clusterColors <- c(brewer.pal(n=11,"Spectral")[-c(4:7)], 
+                     brewer.pal(n=9,"Set1")[-2], 
+                     brewer.pal(n=7,"Dark2")[-2], 
+                     addl_color_vector) 
+  set.seed(2020)
+  cr <- seqGlue::cluster(as.matrix(umap_res[,c("x","y","z")]),
+              pd = umap_res[,c(4:10)], 
+              verbose=T, 
+              num_iter=100,
+              random_seed=2020,
+              resolution = 0.1) #fewer clusters
+  gc()
+  Num_clusters <- length(unique(cr$clusters))
+  clust_col <- paste0("cluster_k",Num_clusters)
+  umap_res[,clust_col] <- cr$clusters
+  clustColor <-  clusterColors[1:Num_clusters] %>% set_names(1:Num_clusters)
+
+    #this is becuase changing the datasets used in clustering results in different groups reaching the >= 10   samples to be given a category/color
+  # incl <- intersect(names(cc$Mutation_Category), unique(umap_res$Mutation_Category))
+  
+  cluster_plots1 <- cluster_plots(umap_results = select(umap_res, 
+                                                        cluster = !! clust_col, everything()),
+                                        colorCodes = clustColor, 
+                                        colorsSubtypes = cc$Mutation_Category)
+
+  ### Modify Clustering Resolution
+  #using Louvain/Leiden community detection, and returns the cluster assignments. 
+  set.seed(2020)
+  cr2 <- seqGlue::cluster(as.matrix(umap_res[,c("x","y","z")]),
+              pd = umap_res[,c(4:10)], 
+              verbose=T, 
+              num_iter=100,
+              random_seed=2020,
+              k=15,
+              resolution = 0.15) #more clusters
+  gc()
+  
+  Num_clusters2 <- length(unique(cr2$clusters))
+  clust_col2 <- paste0("cluster_k",Num_clusters2)
+  umap_res[,clust_col2] <- cr2$clusters
+  clustColor2 <-  clusterColors[1:Num_clusters2] %>% set_names(1:Num_clusters2)
+
+
+  #this is becuase changing the datasets used in clustering results in different groups reaching the >= 10 samples to be given a category/color
+  # incl <- intersect(names(cc$Mutation_Category), unique(umap_res$Mutation_Category))
+  #just for the function to use correct column, select changes the name of the cluster col
+  cluster_plots2 <- cluster_plots(umap_results = select(umap_res,
+                                                        cluster = !! clust_col2, everything()), 
+                                  colorCodes = clustColor2, 
+                                  colorsSubtypes = cc$Mutation_Category)
+  
+  
+  
+  #Outcome Analysis Clustering
+  #Neet to update to correct columns
+  # outcome_df1 <- outcome_by_cluster_df(umap_results = select(umap_res,
+  #                                                            cluster = !! clust_col, everything())) 
+  # cluster_KM1 <- KM_plots_workflow(outcome_data = outcome_df1, 
+  #                                       cc_clusters=clustColor)
+  # 
+  # outcome_df2 <- outcome_by_cluster_df(umap_results = select(umap_res, 
+  #                                                            cluster = !! clust_col2, everything())) 
+  # cluster_KM2 <- KM_plots_workflow(outcome_data = outcome_df2,
+  #                                       cc_clusters=clustColor2)
+  # 
+
+
+  #Results list  
+  results <- list(input_features=input_features,
+                  umap_res=umap_res,
+                  umap_2D_scatter=plots_UMAP,
+                  cluster_plots1=cluster_plots1,
+                  cluster_plots2=cluster_plots2)
+                  # cluster_KM1=cluster_KM1,
+                  # cluster_KM2=cluster_KM2)
+  
+  return(results)
+  
+}
+```
+
+
+#Read in the counts data
+
+```{r}
+swog.cts <- readRDS(file.path(SWOG,"RNA/mRNAseq/analysis/2020.01.16_Kallisto_Quant/SWOG_AML_Kallisto_Quant_GeneLevel_scaledTPM_counts.RDS"))
+
+dim(swog.cts)
+```
+
+
+#Read in the Clinical Data
+
+```{r}
+clinical <- read.csv(file.path(SWOG,"Clinical/CDE/Merged/SWOG_AML_Merged_CDEs_2.20.20.csv"), 
+                     na.strings = c("NA","#N/A","#NA", "N/A", "^$", "^\\.$"))
+
+head(clinical)
+# dim(clinical)
+```
+
+```{r}
+swog_swinfo <- read.csv("SWOG_AML_Kallisto_Quant_Gencode_v29_RepBase_v24.01_Sample_IDmap.csv") %>%
+  filter(Sample_Type != "EXCLUDE") %>%
+  left_join(.,clinical, by="SWOGID") %>%
+  mutate_at(vars(ASXL1_mutation:WT1_mutation), ~ifelse(is.na(.), "Unknown", .)) %>%
+  mutate(Mutation_Category=case_when(
+    DNMT3A_mutation == "Positive" ~ "DNMT3A", 
+    IDH1_mutation == "Positive" | IDH2_mutation == "Positive"  ~ "IDH1/2",
+    
+    # FLT3_mutation == "Positive" & NPM1_mutation == "Positive" ~ "FLT3/NPM1",
+    # FLT3_mutation == "Positive" & WT1_mutation == "Positive" ~ "FLT3/WT1",
+    
+    FLT3_mutation == "Positive" ~ "FLT3",
+    NPM1_mutation == "Positive" ~ "NPM1",
+    WT1_mutation == "Positive" ~ "WT1",
+    # CEBPA_mutation == "Positive" ~ "CEBPA", #only 4??
+    
+    TP53_mutation == "Positive" ~ "P53",
+    SF3B1_mutation == "Positive" | SRSF2_mutation == "Positive" | U2AF1_mutation == "Positive" |
+     SMC1A_mutation == "Positive" | SMC3_mutation == "Positive" ~ "Spliceosome",
+    TRUE ~ Group)) %>%
+  set_rownames(.$filename)
+
+head(swog_swinfo[,3:5])
+# dim(swog_swinfo) #318  90
+write.csv()
+```
+
+```{r}
+Cols <- c("Group","Sample_Type","Mutation_Category",
+          "RNA_Expraction_Type","Tissue_Source","Seq.Method")
+lapply(Cols, function(x) table(swog_swinfo[,x],
+                               useNA='ifany'))
+```
+
+
+
+#Colors for Plotting
+
+```{r}
+col2hex <- function(col, alpha) rgb(t(col2rgb(col)), 
+                                    alpha=alpha, maxColorValue=255)
+SFtheme<-theme_bw() +
+    theme(legend.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          legend.key = element_rect(fill = "transparent",colour = NA),
+    axis.text.x=element_text(angle=90, hjust=0.95,vjust=0.2))
+```
+
+```{r fig.height=2}
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+barplot(rep(1,37), col=colors37, names.arg = colors37, las=2)
+```
+
+```{r fig.height=4}
+ccs <- colorCodes_aheatmap(df=select(swog_info,Cols))
+ccs <- lapply(ccs, function(x){x[["AML"]] <- "grey80"; return(x)})
+# ccs <- lapply(ccs, function(x){x[["NBM"]] <- "white"; return(x)})
+
+
+# par(mar=c(12,4,4,2))
+barplot(rep(1,length(ccs$Sample_Type)), col=ccs$Sample_Type,
+        names.arg=names(ccs$Sample_Type),las=2)
+barplot(rep(1,length(ccs$Mutation_Category)), col=ccs$Mutation_Category,
+        names.arg=names(ccs$Mutation_Category),las=2)
+```
+
+```{r}
+# saveRDS(ccs,"UMAP_ColorCodes_2.20.20.RDS")
+```
+
+
+#Filter Low read counts and select input samples
+
+```{r}
+swog.cts <- as.matrix(swog.cts[rowSums(swog.cts)>= 10, swog_swinfo$filename]) 
+
+dim(swog.cts) #49,700   318
+```
+
+
+#UMAP 
+
+```{r}
+sw_samps <- swog_swinfo$filename
+swog.cts.subset <- swog.cts[, sw_samps]
+swog.cts.subset <- as.matrix(swog.cts.subset[rowSums(swog.cts.subset)>= 10, ])
+
+dim(swog.cts.subset) #49671   318
+
+# lapply(Cols, function(x) table(swog_swinfo[sw_samps,x],
+#                                useNA='ifany'))
+
+```
+
+```{r}
+#TFIDF TRANSFORMED Counts
+# Term Frequency - Inverse Document Frequency (TF-IDF) 
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6101073/
+data <- t(t(swog.cts.subset)/estimateSizeFactorsForMatrix(swog.cts.subset))
+tfs <- tf_idf_transform(data)
+rm(data)
+gc()
+
+# Mean vs Dispersion Feature Selection 
+obj <- calc_dispersion(swog.cts.subset, removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+sgs <- get_selected_genes(select_genes(obj, top_n=NULL))
+tfs <- tfs[sgs,]
+dim(tfs) #12765   318
+```
+
+```{r}
+umap_swog <- UMAP_workflow(TFIDF_Matrix = tfs, 
+                    samples_vector = sw_samps,
+                    swog_info_df = swog_info,
+                    cc = ccs, 
+                     Plotting_Cols = Cols,
+                    uniqID=paste(dim(tfs), collapse = "_"))
+```
+
+```{r}
+# ggsave(plot=umap_swog$umap_2D_scatter, filename = "SWOG_AML_sg4820_UMAP_2D_Scatterplots.pdf", device="pdf", height = 15, width = 18)
+# 
+# ggsave(plot=gridExtra::arrangeGrob(grobs=umap_swog$cluster_plots2, ncol=1,nrow=2),
+#        filename = "SWOG_AML_sg4820_UMAP_LeidenClustering_k7_Scatterplots.pdf",
+#        device="pdf", height = 15, width = 12)
+# 
+# ggsave(plot=gridExtra::arrangeGrob(grobs=umap_swog$cluster_plots2, ncol=1,nrow=2),
+#        filename = "SWOG_AML_sg4820_UMAP_LeidenClustering_k11_Scatterplots.pdf",
+#        device="pdf", height = 15, width = 12)
+```
+
+```{r}
+# length(umap_swog$input_features)
+# saveRDS(umap_swog,"SWOG_AML_UMAP_sg4820.RDS")
+# write.csv(umap_swog$umap_res, "SWOG_AML_sg4820_UMAP_CDE.csv", row.names = FALSE)
+```
+
+
+#Plotly 
+
+```{r}
+library(plotly)
+```
+
+```{r}
+res <- umap_swog$umap_res
+```
+
+```{r}
+swinfo <- paste(res$Sample, 
+              paste0("Mutation Category: ",res$Mutation_Category),
+              paste0("Cluster: ", res$cluster_k11),
+              sep="\n") %>% 
+  ifelse(!is.na(res$Clinical.onset.of.AML),
+         paste( ., res$Clinical.onset.of.AML, sep="\n"), .) %>%
+  ifelse(!is.na(res$Age.years),
+         paste( ., paste("Age:", round(res$Age.years,digits = 1),"yrs"), sep="\n"), .) %>%
+  ifelse(!is.na(res$Best.response.on.tx),
+         paste(., res$Best.response.on.tx, sep="\n"), .)  %>%
+  gsub("Unknown","",.) %>% 
+  set_names(., res$Sample)
+                         
+# sample(swinfo,size = 20)
+# head(swinfo)
+```
+
+```{r fig.width=16}
+p.swog <- plot_ly() %>% 
+  #plot diagnostic and normal samples
+  add_trace(data=res,
+            x = ~x, y = ~y, z = ~z,
+            color = ~Mutation_Category,
+            colors = ccs$Mutation_Category,
+            type='scatter3d',
+            mode='markers',
+            showlegend=TRUE,
+            marker=list(size=2.5),
+            text=swinfo,
+            hoverinfo='text',
+            inherit = TRUE) %>%
+  layout(title=list(text="SWOG AML and Normal Marrow Controls Clustering By Gene Expression\n By Mutation Status",
+                    font = list(color=rgb(1,1,1),
+                                size=18)),
+         scene = list(xaxis = list(title = 'UMAP_1',
+                                   color=rgb(1,1,1),
+                                   size=18,
+                                   backgroundcolor=rgb(0,0,0),
+                                   showbackground=TRUE,
+                                   showgrid=TRUE,
+                                   gridcolor=rgb(1,1,1),
+                                   tickcolor=rgb(1,1,1)),
+                     yaxis = list(title = 'UMAP_2',
+                                  color=rgb(1,1,1),
+                                  size=18,
+                                  backgroundcolor=rgb(0,0,0),
+                                  showbackground=TRUE,
+                                  showgrid=TRUE,
+                                   gridcolor=rgb(1,1,1)),
+                     zaxis = list(title = 'UMAP_3',
+                                  color=rgb(1,1,1),
+                                  size=18,
+                                  backgroundcolor=rgb(0,0,0),
+                                  showbackground=TRUE,
+                                  showgrid=TRUE,
+                                  gridcolor=rgb(1,1,1)),
+                     bgcolor=rgb(0,0,0)),
+         showlegend=TRUE,
+         legend=list(font=list(size=18, color=rgb(1,1,1)),
+                     tracegroupgap=5),
+          plot_bgcolor=rgb(0,0,0),
+         paper_bgcolor=rgb(0,0,0))
+ 
+p.swog
+```
+
+```{r}
+# htmlwidgets::saveWidget(as_widget(p.swog),"SWOG_AML_sg4820_UMAP_3D_plotly.html", background = "black")
+```
+
+
+#TSNE Plot
+
+```{r}
+# tsne<-fftRtsne(X=t(vdata), pca_scale = FALSE, max_iter = 1000,  nthreads=detectCores())
+# 
+# toplot<-data.frame(x=tsne[,1],y=tsne[,2])
+# toplot<-as.data.frame(cbind(toplot, fixed_meta))
+
+
+ggplot(toplot, aes(x=x,y=y,col=Primary_Fusion))+
+  geom_point( size=4)+
+  xlab("UMAP_1") + ylab("UMAP_2")+scale_color_manual(values=cls) -> g1
+m3addon::red_dim_plot(g1)
+```
+
+
+
+
+#Session swinformation
+
+```{r}
+sessionswinfo()
+```
+
